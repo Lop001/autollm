@@ -16,15 +16,174 @@ public class GeminiClient : IDisposable
         Firefox
     }
 
+    public enum GeminiModel
+    {
+        Gemini25Pro,
+        GeminiFlashLatest,
+        Default = Gemini25Pro
+    }
+
+    public class GeminiModelInfo
+    {
+        public GeminiModel Model { get; }
+        public string DisplayName { get; }
+        public string WebIdentifier { get; }
+        public string Description { get; }
+        public bool IsDefault { get; }
+
+        private GeminiModelInfo(GeminiModel model, string displayName, string webIdentifier, string description, bool isDefault = false)
+        {
+            Model = model;
+            DisplayName = displayName;
+            WebIdentifier = webIdentifier;
+            Description = description;
+            IsDefault = isDefault;
+        }
+
+        public static readonly GeminiModelInfo Gemini25Pro = new(
+            GeminiModel.Gemini25Pro,
+            "Gemini 2.5 Pro",
+            "gemini-2.5-pro",
+            "Advanced model for complex reasoning and multi-modal tasks",
+            isDefault: true
+        );
+
+        public static readonly GeminiModelInfo GeminiFlashLatest = new(
+            GeminiModel.GeminiFlashLatest,
+            "Gemini Flash Latest",
+            "gemini-flash",
+            "Fast model optimized for quick responses and simple tasks"
+        );
+
+        public static GeminiModelInfo GetModelInfo(GeminiModel model)
+        {
+            return model switch
+            {
+                GeminiModel.Gemini25Pro => Gemini25Pro,
+                GeminiModel.GeminiFlashLatest => GeminiFlashLatest,
+                _ => throw new ArgumentException($"Unknown model: {model}")
+            };
+        }
+
+        public static GeminiModelInfo GetDefaultModel() => Gemini25Pro;
+
+        public static IEnumerable<GeminiModelInfo> GetAllModels()
+        {
+            yield return Gemini25Pro;
+            yield return GeminiFlashLatest;
+        }
+
+        public static GeminiModel? ParseFromCommandLine(string modelArg)
+        {
+            return modelArg?.ToLowerInvariant() switch
+            {
+                "pro" or "2.5" or "gemini-2.5-pro" or "gemini25pro" => GeminiModel.Gemini25Pro,
+                "flash" or "latest" or "gemini-flash" or "geminiflash" => GeminiModel.GeminiFlashLatest,
+                _ => null
+            };
+        }
+    }
+
+    /// <summary>
+    /// Configuration options for Gemini client initialization and operation
+    /// </summary>
     public class GeminiOptions
     {
+        /// <summary>
+        /// Gets or sets whether the browser should run in headless mode
+        /// </summary>
         public bool Headless { get; set; } = true;
+        
+        /// <summary>
+        /// Gets or sets the timeout for response operations
+        /// </summary>
         public TimeSpan ResponseTimeout { get; set; } = TimeSpan.FromMinutes(2);
+        
+        /// <summary>
+        /// Gets or sets the user agent string for browser requests
+        /// </summary>
         public string UserAgent { get; set; } = "Mozilla/5.0 (X11; Linux x86_64; rv:120.0) Gecko/20100101 Firefox/120.0";
+        
+        /// <summary>
+        /// Gets or sets whether to keep the browser session alive between operations
+        /// </summary>
         public bool KeepSessionAlive { get; set; } = false;
+        
+        /// <summary>
+        /// Gets or sets the browser type to use for automation
+        /// </summary>
         public BrowserType Browser { get; set; } = BrowserType.Firefox;
+        
+        /// <summary>
+        /// Gets or sets whether debug mode is enabled
+        /// </summary>
         public bool DebugMode { get; set; } = false;
+        
+        /// <summary>
+        /// Gets or sets whether session persistence is enabled
+        /// </summary>
         public bool EnableSessionPersistence { get; set; } = true;
+        
+        /// <summary>
+        /// Gets or sets the currently selected Gemini model
+        /// </summary>
+        public GeminiModel SelectedModel { get; set; } = GeminiModel.Default;
+        
+        /// <summary>
+        /// Gets or sets whether model selection functionality is enabled
+        /// </summary>
+        public bool EnableModelSelection { get; set; } = true;
+        
+        /// <summary>
+        /// Gets or sets whether model selection should be persisted across sessions
+        /// </summary>
+        public bool PersistModelSelection { get; set; } = true;
+
+        /// <summary>
+        /// Gets the model information for the currently selected model
+        /// </summary>
+        /// <returns>GeminiModelInfo object containing details about the selected model</returns>
+        public GeminiModelInfo GetModelInfo() => GeminiModelInfo.GetModelInfo(SelectedModel);
+
+        /// <summary>
+        /// Sets the selected model with validation
+        /// </summary>
+        /// <param name="model">The Gemini model to select</param>
+        /// <exception cref="ArgumentException">Thrown when the model value is not valid</exception>
+        public void SetModel(GeminiModel model)
+        {
+            if (!Enum.IsDefined(typeof(GeminiModel), model))
+                throw new ArgumentException($"Invalid model: {model}");
+            
+            SelectedModel = model;
+        }
+
+        /// <summary>
+        /// Sets the selected model from a command line argument with error handling
+        /// </summary>
+        /// <param name="modelArg">Command line argument representing the model (e.g., "pro", "flash", "latest", "2.5")</param>
+        /// <exception cref="ArgumentException">Thrown when the model argument is not recognized</exception>
+        public void SetModelFromCommandLine(string modelArg)
+        {
+            var model = GeminiModelInfo.ParseFromCommandLine(modelArg);
+            if (model.HasValue)
+            {
+                SetModel(model.Value);
+            }
+            else
+            {
+                var availableAliases = new[]
+                {
+                    "pro", "2.5", "gemini-2.5-pro", "gemini25pro", "gemini-pro",
+                    "flash", "latest", "gemini-flash-latest", "geminiflash", "gemini-flash",
+                    "default"
+                };
+                
+                throw new ArgumentException(
+                    $"Unknown model '{modelArg}'. " +
+                    $"Valid options: {string.Join(", ", availableAliases)}");
+            }
+        }
     }
 
     public async Task InitializeAsync(GeminiOptions? options = null)
@@ -59,6 +218,20 @@ public class GeminiClient : IDisposable
         if (options.EnableSessionPersistence)
         {
             sessionLoaded = await SessionManager.LoadSessionAsync(_context);
+            
+            // Load preferred model if no specific model was set and we have a saved preference
+            if (options.SelectedModel == GeminiModel.Gemini25Pro) // Default model, check if we have a preference
+            {
+                var preferredModel = await SessionManager.GetPreferredModelAsync();
+                if (preferredModel.HasValue)
+                {
+                    options.SetModel(preferredModel.Value);
+                    if (options.DebugMode)
+                    {
+                        Console.WriteLine($"Loaded preferred model: {options.GetModelInfo().DisplayName}");
+                    }
+                }
+            }
         }
 
         _page = await _context.NewPageAsync();
@@ -72,8 +245,20 @@ public class GeminiClient : IDisposable
 
         await _page.WaitForLoadStateAsync(LoadState.NetworkIdle);
         
+        // Close any overlay dialogs
+        await CloseOverlayDialogsAsync(options);
+        
         // Check for authentication flow
         await HandleAuthenticationAsync(options);
+        
+        // Apply model selection via localStorage if enabled
+        if (options.EnableModelSelection)
+        {
+            await ApplyModelSelectionViaLocalStorageAsync(options);
+        }
+        
+        // Select the appropriate model
+        await SelectModelAsync(options);
         
         _isInitialized = true;
     }
@@ -467,6 +652,293 @@ public class GeminiClient : IDisposable
         return formatted.Trim();
     }
 
+    private async Task CloseOverlayDialogsAsync(GeminiOptions? options = null)
+    {
+        if (_page == null) return;
+        
+        try
+        {
+            // Wait a moment for any overlay to appear
+            await Task.Delay(2000);
+            
+            // Try different selectors for close buttons in overlay dialogs
+            var closeSelectors = new[]
+            {
+                "button[aria-label*='Close']",
+                "button[aria-label*='close']", 
+                "button[title*='Close']",
+                "button[title*='close']",
+                "[role='button'][aria-label*='Close']",
+                "[role='button'][aria-label*='close']",
+                ".close-button",
+                ".modal-close",
+                "button.close",
+                "[data-testid='close']",
+                "[data-testid='close-button']",
+                "button:has-text('×')",
+                "button:has-text('✕')",
+                "[aria-label='Close dialog']",
+                // Generic close button patterns
+                "button[type='button']:has-text('×')",
+                "[role='dialog'] button:has-text('×')",
+                "[role='modal'] button:has-text('×')"
+            };
+
+            if (options?.DebugMode == true)
+            {
+                Console.WriteLine("Kontroluji overlay dialogy...");
+            }
+
+            foreach (var selector in closeSelectors)
+            {
+                try
+                {
+                    var closeButton = await _page.QuerySelectorAsync(selector);
+                    if (closeButton != null && await closeButton.IsVisibleAsync() && await closeButton.IsEnabledAsync())
+                    {
+                        if (options?.DebugMode == true)
+                        {
+                            Console.WriteLine($"Našel jsem zavírací tlačítko overlay: {selector}");
+                        }
+                        
+                        await closeButton.ClickAsync();
+                        await Task.Delay(1000); // Wait for overlay to close
+                        
+                        if (options?.DebugMode == true)
+                        {
+                            Console.WriteLine("Overlay zavřeno.");
+                        }
+                        break;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    if (options?.DebugMode == true)
+                    {
+                        Console.WriteLine($"Selektor {selector} selhal: {ex.Message}");
+                    }
+                    continue;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            if (options?.DebugMode == true)
+            {
+                Console.WriteLine($"Chyba při zavírání overlay: {ex.Message}");
+            }
+            // Continue anyway - overlay is not critical
+        }
+    }
+
+    private async Task SelectModelAsync(GeminiOptions options)
+    {
+        if (_page == null) return;
+        
+        var selectedModelInfo = options.GetModelInfo();
+        
+        if (options.DebugMode)
+        {
+            Console.WriteLine($"Selecting model: {selectedModelInfo.DisplayName}");
+        }
+        
+        try
+        {
+            // Wait a moment for the page to be ready
+            await Task.Delay(2000);
+            
+            // Try to find model selection dropdown or buttons
+            var modelSelectors = new[]
+            {
+                // Model dropdown selectors
+                "[data-testid='model-selector']",
+                "select[aria-label*='model']",
+                "select[aria-label*='Model']",
+                "[role='combobox'][aria-label*='model']",
+                "[role='combobox'][aria-label*='Model']",
+                
+                // Button-based model selectors
+                "button[aria-label*='model']",
+                "button[aria-label*='Model']",
+                "button:has-text('Gemini')",
+                "[data-testid='model-button']",
+                
+                // Generic model selection elements
+                "[class*='model-selector']",
+                "[class*='model-dropdown']",
+                "[id*='model-select']"
+            };
+            
+            bool modelSelected = false;
+            
+            foreach (var selector in modelSelectors)
+            {
+                try
+                {
+                    if (options.DebugMode)
+                    {
+                        Console.WriteLine($"Trying model selector: {selector}");
+                    }
+                    
+                    var element = await _page.WaitForSelectorAsync(selector, new PageWaitForSelectorOptions { Timeout = 3000 });
+                    if (element != null && await element.IsVisibleAsync() && await element.IsEnabledAsync())
+                    {
+                        if (options.DebugMode)
+                        {
+                            Console.WriteLine($"Found model selector: {selector}");
+                        }
+                        
+                        // Click to open dropdown
+                        await element.ClickAsync();
+                        await Task.Delay(1000);
+                        
+                        // Try to find and select the desired model
+                        modelSelected = await SelectModelFromDropdownAsync(selectedModelInfo, options);
+                        
+                        if (modelSelected)
+                        {
+                            if (options.DebugMode)
+                            {
+                                Console.WriteLine($"Successfully selected model: {selectedModelInfo.DisplayName}");
+                            }
+                            
+                            // Save preferred model for future sessions
+                            if (options.EnableSessionPersistence)
+                            {
+                                await SessionManager.SavePreferredModelAsync(selectedModelInfo.Model);
+                            }
+                            
+                            break;
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    if (options.DebugMode)
+                    {
+                        Console.WriteLine($"Model selector {selector} failed: {ex.Message}");
+                    }
+                    continue;
+                }
+            }
+            
+            if (!modelSelected)
+            {
+                if (options.DebugMode)
+                {
+                    Console.WriteLine($"Could not find model selector. Using default model selection.");
+                    
+                    // Take screenshot for debugging
+                    await _page.ScreenshotAsync(new PageScreenshotOptions { Path = "model_selection_debug.png" });
+                    Console.WriteLine("Model selection screenshot saved as model_selection_debug.png");
+                }
+                
+                // If we can't find model selector, we'll proceed with whatever model is currently selected
+                // This might be acceptable for the default model (Gemini 2.5 Pro)
+                if (selectedModelInfo.Model != GeminiModel.Gemini25Pro)
+                {
+                    Console.WriteLine($"Warning: Could not select {selectedModelInfo.DisplayName}. Using default model instead.");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            if (options.DebugMode)
+            {
+                Console.WriteLine($"Error during model selection: {ex.Message}");
+            }
+            
+            // Non-critical error - continue with default model
+            if (selectedModelInfo.Model != GeminiModel.Gemini25Pro)
+            {
+                Console.WriteLine($"Warning: Failed to select {selectedModelInfo.DisplayName}. Using default model instead.");
+            }
+        }
+    }
+    
+    private async Task<bool> SelectModelFromDropdownAsync(GeminiModelInfo modelInfo, GeminiOptions options)
+    {
+        if (_page == null) return false;
+        
+        try
+        {
+            // Look for model options in dropdown
+            var modelOptionSelectors = new[]
+            {
+                // Text-based matching
+                $"[role='option']:has-text('{modelInfo.DisplayName}')",
+                $"[role='menuitem']:has-text('{modelInfo.DisplayName}')",
+                $"li:has-text('{modelInfo.DisplayName}')",
+                $"div:has-text('{modelInfo.DisplayName}')",
+                
+                // Identifier-based matching
+                $"[data-value='{modelInfo.WebIdentifier}']",
+                $"[value='{modelInfo.WebIdentifier}']",
+                
+                // Partial text matching for flexibility
+                $"[role='option']:has-text('2.5 Pro')",
+                $"[role='option']:has-text('Flash')",
+                $"[role='menuitem']:has-text('2.5 Pro')",
+                $"[role='menuitem']:has-text('Flash')"
+            };
+            
+            foreach (var selector in modelOptionSelectors)
+            {
+                try
+                {
+                    if (options.DebugMode)
+                    {
+                        Console.WriteLine($"Looking for model option: {selector}");
+                    }
+                    
+                    var option = await _page.WaitForSelectorAsync(selector, new PageWaitForSelectorOptions { Timeout = 2000 });
+                    if (option != null && await option.IsVisibleAsync())
+                    {
+                        // Check if this option matches our desired model
+                        var optionText = await option.TextContentAsync() ?? "";
+                        
+                        bool isMatch = modelInfo.Model switch
+                        {
+                            GeminiModel.Gemini25Pro => optionText.Contains("2.5") || optionText.Contains("Pro"),
+                            GeminiModel.GeminiFlashLatest => optionText.Contains("Flash") || optionText.Contains("Latest"),
+                            _ => false
+                        };
+                        
+                        if (isMatch)
+                        {
+                            if (options.DebugMode)
+                            {
+                                Console.WriteLine($"Clicking model option: {optionText}");
+                            }
+                            
+                            await option.ClickAsync();
+                            await Task.Delay(1000);
+                            return true;
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    if (options.DebugMode)
+                    {
+                        Console.WriteLine($"Model option selector {selector} failed: {ex.Message}");
+                    }
+                    continue;
+                }
+            }
+            
+            return false;
+        }
+        catch (Exception ex)
+        {
+            if (options.DebugMode)
+            {
+                Console.WriteLine($"Error selecting model from dropdown: {ex.Message}");
+            }
+            return false;
+        }
+    }
+
     private async Task HandleAuthenticationAsync(GeminiOptions options)
     {
         if (_page == null) return;
@@ -498,8 +970,168 @@ public class GeminiClient : IDisposable
             // Save session after successful authentication
             if (options.EnableSessionPersistence)
             {
-                await SessionManager.SaveSessionAsync(_context!);
+                await SessionManager.SaveSessionAsync(_context!, options.SelectedModel);
             }
+        }
+    }
+
+    /// <summary>
+    /// Applies model selection via localStorage if enabled, with graceful degradation and session persistence
+    /// </summary>
+    /// <param name="options">Gemini options containing model selection preferences</param>
+    private async Task ApplyModelSelectionViaLocalStorageAsync(GeminiOptions options)
+    {
+        if (_page == null)
+        {
+            if (options.DebugMode)
+            {
+                Console.WriteLine("Page not initialized, skipping localStorage model selection");
+            }
+            return;
+        }
+
+        try
+        {
+            // Load persisted model selection from SessionManager if no specific model was set
+            if (options.SelectedModel == GeminiModel.Default && options.PersistModelSelection)
+            {
+                var preferredModel = await SessionManager.GetPreferredModelAsync();
+                if (preferredModel.HasValue && preferredModel.Value != options.SelectedModel)
+                {
+                    options.SetModel(preferredModel.Value);
+                    if (options.DebugMode)
+                    {
+                        Console.WriteLine($"Loaded persisted model selection: {options.GetModelInfo().DisplayName}");
+                    }
+                }
+            }
+
+            // Apply current model selection via localStorage
+            if (options.SelectedModel != GeminiModel.Default)
+            {
+                if (options.DebugMode)
+                {
+                    Console.WriteLine($"Applying model selection via localStorage: {options.GetModelInfo().DisplayName}");
+                }
+
+                // Store current model for comparison to detect if page refresh is needed
+                var initialUrl = _page.Url;
+                
+                try
+                {
+                    await SetModelViaLocalStorageAsync(options.SelectedModel, options);
+                    
+                    // Check if page refresh is needed (localStorage changes might require it)
+                    if (await IsPageRefreshNeededAsync(options))
+                    {
+                        if (options.DebugMode)
+                        {
+                            Console.WriteLine("Page refresh required after localStorage model change");
+                        }
+                        
+                        await _page.ReloadAsync(new PageReloadOptions 
+                        { 
+                            WaitUntil = WaitUntilState.NetworkIdle,
+                            Timeout = 30000
+                        });
+                        
+                        await _page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+                        
+                        // Re-handle any dialogs that might appear after refresh
+                        await CloseOverlayDialogsAsync(options);
+                    }
+
+                    // Save successful model selection to session
+                    if (options.EnableSessionPersistence && options.PersistModelSelection)
+                    {
+                        await SessionManager.SavePreferredModelAsync(options.SelectedModel);
+                        if (options.DebugMode)
+                        {
+                            Console.WriteLine($"Saved model selection to session: {options.GetModelInfo().DisplayName}");
+                        }
+                    }
+                }
+                catch (InvalidOperationException ex) when (ex.Message.Contains("localStorage"))
+                {
+                    // Graceful degradation: localStorage operations failed, continue with existing flow
+                    if (options.DebugMode)
+                    {
+                        Console.WriteLine($"localStorage model selection failed, continuing with fallback: {ex.Message}");
+                    }
+                    
+                    // Continue with existing initialization flow - SelectModelAsync will handle model selection
+                }
+            }
+            else if (options.DebugMode)
+            {
+                Console.WriteLine("Using default model, skipping localStorage model selection");
+            }
+        }
+        catch (Exception ex)
+        {
+            // Graceful degradation: any unexpected errors should not break initialization
+            if (options.DebugMode)
+            {
+                Console.WriteLine($"Model selection via localStorage failed, continuing with existing flow: {ex.Message}");
+            }
+            
+            // Continue with existing initialization flow
+        }
+    }
+
+    /// <summary>
+    /// Determines if a page refresh is needed after localStorage changes
+    /// </summary>
+    /// <param name="options">Gemini options for debug logging</param>
+    /// <returns>True if page refresh is needed, false otherwise</returns>
+    private async Task<bool> IsPageRefreshNeededAsync(GeminiOptions options)
+    {
+        if (_page == null) return false;
+
+        try
+        {
+            // Check if the page has any indicators that suggest a refresh is needed
+            // This is a heuristic - in most cases localStorage changes are applied immediately
+            // but some applications might require a refresh to pick up the changes
+            
+            var jsCode = """
+                (function() {
+                    try {
+                        // Check if there are any pending DOM updates or if the page state suggests refresh is needed
+                        // For Gemini AI Studio, usually localStorage changes are applied immediately
+                        // but we can check for specific indicators
+                        
+                        const hasModelSelectionUI = document.querySelector('[data-testid="model-selector"]') != null ||
+                                                   document.querySelector('.model-selector') != null ||
+                                                   document.querySelector('[aria-label*="model"]') != null;
+                        
+                        // If we can't find model selection UI, a refresh might help
+                        return !hasModelSelectionUI;
+                    } catch (error) {
+                        // If we can't determine, err on the side of not refreshing
+                        return false;
+                    }
+                })();
+                """;
+
+            var result = await _page.EvaluateAsync<bool>(jsCode);
+            
+            if (options.DebugMode && result)
+            {
+                Console.WriteLine("Page refresh needed: model selection UI not found");
+            }
+            
+            return result;
+        }
+        catch (Exception ex)
+        {
+            if (options.DebugMode)
+            {
+                Console.WriteLine($"Could not determine if page refresh is needed: {ex.Message}");
+            }
+            
+            // Default to not refreshing if we can't determine
+            return false;
         }
     }
 
@@ -535,6 +1167,112 @@ public class GeminiClient : IDisposable
         _playwright?.Dispose();
         
         _isInitialized = false;
+    }
+
+    /// <summary>
+    /// Sets the model preference via localStorage using JavaScript execution
+    /// </summary>
+    /// <param name="model">The Gemini model to set</param>
+    /// <param name="options">Optional configuration options</param>
+    /// <returns>Task that completes when the model has been set and verified</returns>
+    /// <exception cref="InvalidOperationException">Thrown when localStorage access fails or page is not initialized</exception>
+    public async Task SetModelViaLocalStorageAsync(GeminiModel model, GeminiOptions? options = null)
+    {
+        if (_page == null)
+        {
+            throw new InvalidOperationException("Page not initialized. Call InitializeAsync first.");
+        }
+
+        options ??= new GeminiOptions();
+        var modelInfo = GeminiModelInfo.GetModelInfo(model);
+        
+        // Build localStorage identifier from WebIdentifier
+        var localStorageIdentifier = model switch
+        {
+            GeminiModel.Gemini25Pro => "models/gemini-2.5-pro",
+            GeminiModel.GeminiFlashLatest => "models/gemini-flash-latest",
+            _ => throw new ArgumentException($"Unknown model: {model}")
+        };
+        
+        if (options.DebugMode)
+        {
+            Console.WriteLine($"Setting model via localStorage: {modelInfo.DisplayName} ({localStorageIdentifier})");
+        }
+
+        try
+        {
+            // JavaScript code to safely update localStorage
+            var jsCode = """
+                (function() {
+                    try {
+                        const storageKey = 'aiStudioUserPreference';
+                        const modelId = arguments[0];
+                        
+                        // Read current preferences
+                        let preferences = {};
+                        const currentValue = localStorage.getItem(storageKey);
+                        
+                        if (currentValue) {
+                            try {
+                                preferences = JSON.parse(currentValue);
+                            } catch (parseError) {
+                                console.warn('Failed to parse existing localStorage preferences:', parseError);
+                                preferences = {};
+                            }
+                        }
+                        
+                        // Update promptModel field only
+                        preferences.promptModel = modelId;
+                        
+                        // Write back updated preferences
+                        const updatedValue = JSON.stringify(preferences);
+                        localStorage.setItem(storageKey, updatedValue);
+                        
+                        // Verify the update was successful
+                        const verifyValue = localStorage.getItem(storageKey);
+                        if (verifyValue) {
+                            const verifyParsed = JSON.parse(verifyValue);
+                            if (verifyParsed.promptModel === modelId) {
+                                return { success: true, preferences: verifyParsed };
+                            } else {
+                                return { success: false, error: 'Verification failed - promptModel does not match' };
+                            }
+                        } else {
+                            return { success: false, error: 'Verification failed - localStorage value not found' };
+                        }
+                    } catch (error) {
+                        return { success: false, error: error.message };
+                    }
+                })();
+                """;
+
+            // Execute JavaScript with the model identifier as parameter
+            var result = await _page.EvaluateAsync<dynamic>(jsCode, localStorageIdentifier);
+
+            // Parse the result
+            if (result?.success == true)
+            {
+                if (options.DebugMode)
+                {
+                    Console.WriteLine($"Successfully set model in localStorage: {modelInfo.DisplayName}");
+                    Console.WriteLine($"Updated preferences: {result.preferences}");
+                }
+            }
+            else
+            {
+                var errorMessage = result?.error?.ToString() ?? "Unknown error";
+                throw new InvalidOperationException($"Failed to set model in localStorage: {errorMessage}");
+            }
+        }
+        catch (Exception ex) when (!(ex is InvalidOperationException))
+        {
+            if (options.DebugMode)
+            {
+                Console.WriteLine($"Error setting model via localStorage: {ex.Message}");
+            }
+            
+            throw new InvalidOperationException($"localStorage access failed: {ex.Message}", ex);
+        }
     }
 
     public void Dispose()
